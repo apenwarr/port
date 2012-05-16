@@ -48,7 +48,9 @@ def main():
     if opt.limit > max(115200, opt.speed):
         o.fatal('--limit should be no more than --speed')
 
-    fd = os.open(filename, os.O_RDWR)
+    fd = os.open(filename, os.O_RDWR | os.O_NONBLOCK)
+    fcntl.fcntl(fd, fcntl.F_SETFL,
+                fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
     tc_stdin_orig = tc_stdin = termios.tcgetattr(0)
     tc_fd_orig = tc_fd = termios.tcgetattr(fd)
 
@@ -58,6 +60,7 @@ def main():
     try:
         tc_fd[4] = tc_fd[5] = speedv
         tc_fd[2] &= ~(termios.PARENB | termios.PARODD)
+        tc_fd[2] |= termios.CLOCAL
         termios.tcsetattr(fd, termios.TCSANOW, tc_fd)
         tty.setraw(fd)
         tty.setraw(0)
