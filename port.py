@@ -20,17 +20,53 @@ def log(s, *args):
     sys.stderr.flush()
 
 
-def modem_flags(fd):
-    bits = [(i, getattr(termios,i))
-            for i in dir(termios)
-            if i.startswith('TIOCM_')]
-    tbuf = array.array('i', [0])
-    fcntl.ioctl(fd, termios.TIOCMGET, tbuf, True)
-    out = []
-    for name, bit in sorted(bits):
-        if tbuf[0] & bit:
-            out.append(name[6:])
-    return ', '.join(out)
+class ModemError(Exception):
+    pass
+
+
+def _speedv(speed):
+    try:
+        return termios.__dict__['B%s' % int(speed)]
+    except KeyError:
+        raise ModemError('invalid port speed: %r (try 115200, 57600, etc)'
+                         % speed)
+
+
+class Modem(object):
+    def __init__(self, filename, speed):
+        self.fd = self.tc_orig = None
+        self.fd = os.open(filename, os.O_RDWR | os.O_NONBLOCK)
+        fcntl.fcntl(self.fd, fcntl.F_SETFL,
+                    fcntl.fcntl(self.fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        self.tc_orig = tc = termios.tcgetattr(self.fd)
+        tc[4] = tc[5] = _speedv(speed)
+        tc[2] &= ~(termios.PARENB | termios.PARODD)
+        tc[2] |= termios.CLOCAL
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, tc)
+        tty.setraw(self.fd)
+
+    def __del__(self):
+        self.close()
+
+    def close(self):
+        if self.fd is not None:
+            try:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.tc_orig)
+            except:
+                pass
+            os.close(self.fd)
+
+    def flags(self):
+        bits = [(i, getattr(termios,i))
+                for i in dir(termios)
+                if i.startswith('TIOCM_')]
+        tbuf = array.array('i', [0])
+        fcntl.ioctl(self.fd, termios.TIOCMGET, tbuf, True)
+        out = []
+        for name, bit in sorted(bits):
+            if tbuf[0] & bit:
+                out.append(name[6:])
+        return ', '.join(out)
     
 
 def main():
@@ -39,30 +75,18 @@ def main():
     if len(extra) != 1:
         o.fatal("exactly one tty name expected")
     filename = extra[0]
-    try:
-        speedv = termios.__dict__['B%s' % int(opt.speed)]
-    except KeyError:
-        o.fatal('invalid port speed: %r (try 115200, 57600, etc)' % opt.speed)
     if opt.limit and opt.limit < 300:
         o.fatal('--limit should be at least 300 bps')
-    if opt.limit > max(115200, opt.speed):
+    if opt.limit > max(115200, int(opt.speed)):
         o.fatal('--limit should be no more than --speed')
 
-    fd = os.open(filename, os.O_RDWR | os.O_NONBLOCK)
-    fcntl.fcntl(fd, fcntl.F_SETFL,
-                fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
-    tc_stdin_orig = tc_stdin = termios.tcgetattr(0)
-    tc_fd_orig = tc_fd = termios.tcgetattr(fd)
+    tc_stdin_orig = termios.tcgetattr(0)
+    modem = Modem(filename, opt.speed)
 
     line = ''
     MAGIC = ['~.', '!.']
 
     try:
-        tc_fd[4] = tc_fd[5] = speedv
-        tc_fd[2] &= ~(termios.PARENB | termios.PARODD)
-        tc_fd[2] |= termios.CLOCAL
-        termios.tcsetattr(fd, termios.TCSANOW, tc_fd)
-        tty.setraw(fd)
         tty.setraw(0)
 
         mflags = None
@@ -73,12 +97,12 @@ def main():
         log('(Type ~. or !. to exit)')
 
         while 1:
-            newflags = modem_flags(fd)
+            newflags = modem.flags()
             if newflags != mflags:
                 mflags = newflags
                 log('\n(Line Status: %s)\n', mflags)
 
-            r,w,x = select.select([0,fd], [], [])
+            r,w,x = select.select([0,modem.fd], [], [])
             if 0 in r:
                 buf = os.read(0, 1)
                 if buf in '\r\n\x03':
@@ -88,11 +112,11 @@ def main():
                 if line in MAGIC:
                     break
                 if len(buf):
-                    os.write(fd, buf)
+                    os.write(modem.fd, buf)
                     if opt.limit:
                         time.sleep(secs_per_byte)
-            if fd in r:
-                buf = os.read(fd, 4096)
+            if modem.fd in r:
+                buf = os.read(modem.fd, 4096)
                 if len(buf):
                     os.write(1, buf)
                 if buf == '\0':
