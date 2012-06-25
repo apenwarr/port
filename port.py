@@ -55,7 +55,7 @@ def main():
     tc_fd_orig = tc_fd = termios.tcgetattr(fd)
 
     line = ''
-    MAGIC='~.'
+    MAGIC = ['~.', '!.']
 
     try:
         tc_fd[4] = tc_fd[5] = speedv
@@ -70,7 +70,7 @@ def main():
         if opt.limit:
             secs_per_byte = 1.0 / (float(opt.limit) / 10)
             assert(secs_per_byte < 0.1)
-        log('(Type ~. to exit)')
+        log('(Type ~. or !. to exit)')
 
         while 1:
             newflags = modem_flags(fd)
@@ -85,7 +85,7 @@ def main():
                     line = ''
                 else:
                     line += buf
-                if line == MAGIC:
+                if line in MAGIC:
                     break
                 if len(buf):
                     os.write(fd, buf)
