@@ -67,7 +67,10 @@ class Modem(object):
             if tbuf[0] & bit:
                 out.append(name[6:])
         return ', '.join(out)
-    
+
+    def sendbreak(self):
+        termios.tcsendbreak(self.fd, 0)
+
 
 def main():
     o = options.Options(optspec)
@@ -94,7 +97,7 @@ def main():
         if opt.limit:
             secs_per_byte = 1.0 / (float(opt.limit) / 10)
             assert(secs_per_byte < 0.1)
-        log('(Type ~. or !. to exit)')
+        log('(Type ~. or !. to exit, or ~b to send BREAK)')
 
         while 1:
             newflags = modem.flags()
@@ -111,7 +114,11 @@ def main():
                     line += buf
                 if line in MAGIC:
                     break
-                if len(buf):
+                if line == '~b':
+                    log('(BREAK)')
+                    modem.sendbreak()
+                    line = ''
+                elif len(buf):
                     os.write(modem.fd, buf)
                     if opt.limit:
                         time.sleep(secs_per_byte)
