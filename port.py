@@ -26,7 +26,16 @@
 # NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-import sys, os, tty, termios, fcntl, select, array, time
+import array
+import errno
+import fcntl
+import os
+import random
+import select
+import sys
+import termios
+import time
+import tty
 import options
 
 optspec = """
@@ -50,6 +59,9 @@ def log(s, *args):
 class ModemError(Exception):
     pass
 
+class AlreadyLockedError(Exception):
+    pass
+
 
 def _speedv(speed):
     try:
@@ -59,9 +71,100 @@ def _speedv(speed):
                          % speed)
 
 
+def _unlink(path):
+    try:
+        os.unlink(path)
+    except OSError, e:
+        if e.errno == errno.ENOENT:
+            return  # it's deleted, so that's not an error
+        raise
+
+
+class Lock(object):
+    """Represents a unix tty lockfile to prevent overlapping access."""
+
+    def __init__(self, devname):
+        assert '/' not in devname
+        if os.path.exists('/var/lock'):
+            # Linux standard location
+            self.path = '/var/lock/LCK..%s' % devname
+        else:
+            # this is the patch minicom seems to use on MacOS X
+            self.path = '/tmp/LCK..%s' % devname
+        self.lock()
+
+    def __del__(self):
+        self.unlock()
+
+    def read(self):
+        try:
+            return int(open(self.path).read().strip().split()[0])
+        except IOError, e:
+            if e.errno == errno.ENOENT:
+                return None  # not locked
+            else:
+                return 0  # invalid lock
+        except ValueError:
+            return 0
+
+    def _pid_exists(self, pid):
+        assert pid > 0
+        try:
+            os.kill(pid, 0)  # 0 is a signal that always does nothing
+        except OSError, e:
+            if e.errno == errno.EPERM:  # no permission means it exists!
+                return True
+            if e.errno == errno.ESRCH:  # not found
+                return False
+            raise  # any other error is weird, pass it on
+        return True  # no error means it exists
+
+    def _try_lock(self):
+        try:
+            fd = os.open(self.path, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0666)
+        except OSError:
+            return
+        try:
+            os.write(fd, '%s\n' % os.getpid())
+        finally:
+            os.close(fd)
+
+    def lock(self):
+        mypid = os.getpid()
+        for _ in range(10):
+            pid = self.read()
+            if pid == mypid:
+                return
+            elif pid is None:
+                # file did not exist
+                self._try_lock()
+            elif pid > 0 and self._pid_exists(pid):
+                raise AlreadyLockedError('%r locked by pid %d'
+                                         % (self.path, pid))
+            else:
+                # the lock owner died or didn't write a pid.  Cleaning it
+                # creates a race condition.  Delete it only after
+                # double checking.
+                time.sleep(0.2 + 0.2*random.random())
+                pid2 = self.read()
+                if pid2 == pid and (pid == 0 or not self._pid_exists(pid)):
+                    _unlink(self.path)
+                # now loop and try again.  Someone else might be racing with
+                # us, so there's no guarantee we'll get the lock on our
+                # next try.
+        raise AlreadyLockedError('%r lock contention detected' % self.path)
+
+    def unlock(self):
+        if self.read() == os.getpid():
+            _unlink(self.path)
+
+
 class Modem(object):
     def __init__(self, filename, speed):
         self.fd = self.tc_orig = None
+        if '/' not in filename and os.path.exists('/dev/%s' % filename):
+            filename = '/dev/%s' % filename
+        self.lock = Lock(os.path.basename(filename))
         self.fd = os.open(filename, os.O_RDWR | os.O_NONBLOCK)
         fcntl.fcntl(self.fd, fcntl.F_SETFL,
                     fcntl.fcntl(self.fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
@@ -160,4 +263,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except AlreadyLockedError, e:
+        sys.stderr.write('error: %s\n' % e)
+        exit(1)
